@@ -108,3 +108,18 @@ print("관절 각도 (도):", np.degrees(angles))
 T05 = forward_kinematics(*angles, d1, d2, L1, L2, L3)
 print("계산된 엔드이펙터 위치:", T05[:3,3])
 print("목표 엔드이펙터 위치:", T06[:3,3])
+def forward_kinematics(theta1, theta2, theta3, theta4, theta5, d1, d2, L1, L2, L3):
+    # 어깨 관절 3자유도: Y -> X -> Z축 순서의 회전 적용
+    T01 = to_homogeneous(rot_y(theta1), np.array([0, 0, d1]))  # θ1: 어깨 앞뒤 회전 (Y축)
+    T12 = to_homogeneous(rot_x(theta2), np.array([0, 0, d2]))  # θ2: 팔 벌림 (X축)
+    T23 = to_homogeneous(rot_z(theta3), np.array([0, 0, L1]))   # θ3: 팔 안/밖 회전 (Z축)
+
+    # 팔꿈치 + 손목
+    T34 = to_homogeneous(rot_y(theta4), np.array([0, 0, L2]))      # θ4: 팔꿈치 굽힘 (Y축)
+    T45 = to_homogeneous(rot_y(theta5), np.array([0, 0, L3])) # θ5: 손목 pitch (Y축)
+
+    # 전체 변환 행렬: 어깨~손끝까지 누적 곱
+    T05 = T01 @ T12 @ T23 @ T34 @ T45
+    return T05
+
+## 공부 중
