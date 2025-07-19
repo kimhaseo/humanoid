@@ -28,19 +28,20 @@ def to_homogeneous(R, t):
 
 # ===== 정방향 기구학 (Forward Kinematics) =====
 def forward_kinematics(theta1, theta2, theta3, theta4, theta5, d1, d2, L1, L2, L3):
-    # 어깨 관절 3자유도: Y -> X -> Z축 순서의 회전 적용
-    T01 = to_homogeneous(rot_y(theta1), np.array([0, 0, d1]))  # θ1: 어깨 앞뒤 회전 (Y축)
-    T12 = to_homogeneous(rot_x(theta2), np.array([0, 0, d2]))  # θ2: 팔 벌림 (X축)
-    T23 = to_homogeneous(rot_z(theta3), np.array([0, 0, L1]))   # θ3: 팔 안/밖 회전 (Z축)
+    L1_total = d2 + L1  # 어깨 yaw + 상완 길이 통합
+
+    # 어깨 회전 3자유도
+    T01 = to_homogeneous(rot_y(theta1), np.array([0, 0, d1]))              # θ1: Y축, 어깨 높이
+    T12 = to_homogeneous(rot_x(theta2), np.array([0, 0, 0]))               # θ2: X축 회전만
+    T23 = to_homogeneous(rot_z(theta3), np.array([0, 0, L1_total]))        # θ3: Z축 회전, 이동은 한꺼번에
 
     # 팔꿈치 + 손목
-    T34 = to_homogeneous(rot_y(theta4), np.array([0, 0, L2]))      # θ4: 팔꿈치 굽힘 (Y축)
-    T45 = to_homogeneous(rot_y(theta5), np.array([0, 0, L3])) # θ5: 손목 pitch (Y축)
+    T34 = to_homogeneous(rot_y(theta4), np.array([0, 0, L2]))              # θ4: Y축
+    T45 = to_homogeneous(rot_y(theta5), np.array([0, 0, L3]))              # θ5: Y축
 
-    # 전체 변환 행렬: 어깨~손끝까지 누적 곱
+    # 누적변환
     T05 = T01 @ T12 @ T23 @ T34 @ T45
     return T05
-
 # ===== 역기구학 (Inverse Kinematics) =====
 def inverse_kinematics(T06, d1, d2, L1, L2, L3):
     # 목표 위치와 자세 행렬 분리
@@ -51,6 +52,10 @@ def inverse_kinematics(T06, d1, d2, L1, L2, L3):
     P_wc = P06 - R06[:,2] * L3  # 엔드이펙터 Z축 방향으로 L3만큼 빼기
     x_wc, y_wc, z_wc = P_wc
 
+    x_wc = 100
+    y_wc = 40
+    z_wc = 100
+
     # Step 2: 어깨 Y축 회전 각도 θ1 (x-z 평면 기준)
     theta1 = np.arctan2(x_wc, z_wc)  # 주의: arctan2(x, z)
 
@@ -59,22 +64,26 @@ def inverse_kinematics(T06, d1, d2, L1, L2, L3):
     y = y_wc - d1   # d1 + d2는 어깨에서 팔꿈치까지 오프셋
 
     # Step 4: 팔꿈치 각도 θ4 계산 (코사인 법칙)
-    D = (r**2 + y**2 - L1**2 - L2**2) / (2 * L1 * L2)
-    D = np.clip(D, -1.0, 1.0)          # 역삼각함수 안전 범위 보정
-    theta4 = np.arccos(D)             # 팔꿈치 굽힘 각도
+    L1_total = d2 + L1  # 전체 상완 거리 (d2 포함)
+    D = (L1_total ** 2 + L2 ** 2 - (r ** 2 + y ** 2)) / (2 * L1_total * L2)
+    D = np.clip(D, -1.0, 1.0)
+    theta4 = np.arccos(D)
 
     # Step 5: 어깨 X축 회전 각도 θ2 계산
     phi = np.arctan2(y, r)  # 어깨와 손목 사이 각도
     psi = np.arctan2(L2*np.sin(theta4), L1 + L2*np.cos(theta4))  # 삼각형 내부각
     theta2 = phi - psi
 
-    # Step 6: T04 계산 (손목 이전까지 변환행렬)
+    # Step 6: T04 계산 (어깨~팔꿈치 끝까지)
+    L1_total = d2 + L1  # 상완 전체 거리
+
     T01 = to_homogeneous(rot_y(theta1), np.array([0, 0, d1]))
-    T12 = to_homogeneous(rot_x(theta2), np.array([0, 0, d2]))
-    T23 = to_homogeneous(rot_z(0), np.array([0, 0, 0]))  # θ3는 아직 모름
-    T34 = to_homogeneous(rot_y(theta4), np.array([0, 0, L1]))
+    T12 = to_homogeneous(rot_x(theta2), np.array([0, 0, 0]))  # X축 회전만
+    T23 = to_homogeneous(rot_z(0), np.array([0, 0, L1_total]))  # Z축 회전, 이동 포함
+    T34 = to_homogeneous(rot_y(theta4), np.array([0, 0, 0]))  # Y축 회전만
+
     T04 = T01 @ T12 @ T23 @ T34
-    R04 = T04[:3,:3]  # 회전행렬만 분리
+    R04 = T04[:3, :3]
 
     # Step 7: 팔꿈치 이후의 회전행렬 R46 구함
     R46 = R04.T @ R06
@@ -88,38 +97,24 @@ def inverse_kinematics(T06, d1, d2, L1, L2, L3):
     return theta1, theta2, theta3, theta4, theta5
 
 # ===== 테스트 예시 =====
-px, py, pz = 100, 200, 150  # 목표 위치
-R_desired = rot_z(np.radians(10)) @ rot_y(0) @ rot_x(0)  # 목표 자세 (회전 행렬)
+px, py, pz = 100, 40, 70  # 목표 위치
+R_desired = rot_z(np.radians(0)) @ rot_y(0) @ rot_x(0)  # 목표 자세 (회전 행렬)
 T06 = to_homogeneous(R_desired, np.array([px, py, pz]))
 
 # 로봇 링크 파라미터
 d1 = 40   # 어깨에서 상체 시작 높이
 d2 = 50   # 어깨 두께 또는 offset
-L1 = 120  # 상완 길이
+L1 = 100  # 상완 길이
 L2 = 100  # 하완 길이
 L3 = 50   # 손끝 길이
 
 # ===== 역기구학 수행 =====
 angles = inverse_kinematics(T06, d1, d2, L1, L2, L3)
-print("관절 각도 (라디안):", angles)
 print("관절 각도 (도):", np.degrees(angles))
 
 # ===== 정방향 검증 =====
 T05 = forward_kinematics(*angles, d1, d2, L1, L2, L3)
 print("계산된 엔드이펙터 위치:", T05[:3,3])
 print("목표 엔드이펙터 위치:", T06[:3,3])
-def forward_kinematics(theta1, theta2, theta3, theta4, theta5, d1, d2, L1, L2, L3):
-    # 어깨 관절 3자유도: Y -> X -> Z축 순서의 회전 적용
-    T01 = to_homogeneous(rot_y(theta1), np.array([0, 0, d1]))  # θ1: 어깨 앞뒤 회전 (Y축)
-    T12 = to_homogeneous(rot_x(theta2), np.array([0, 0, d2]))  # θ2: 팔 벌림 (X축)
-    T23 = to_homogeneous(rot_z(theta3), np.array([0, 0, L1]))   # θ3: 팔 안/밖 회전 (Z축)
-
-    # 팔꿈치 + 손목
-    T34 = to_homogeneous(rot_y(theta4), np.array([0, 0, L2]))      # θ4: 팔꿈치 굽힘 (Y축)
-    T45 = to_homogeneous(rot_y(theta5), np.array([0, 0, L3])) # θ5: 손목 pitch (Y축)
-
-    # 전체 변환 행렬: 어깨~손끝까지 누적 곱
-    T05 = T01 @ T12 @ T23 @ T34 @ T45
-    return T05
 
 ## 공부 중
