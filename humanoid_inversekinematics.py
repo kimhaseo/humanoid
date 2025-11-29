@@ -1,157 +1,152 @@
-from dataclasses import dataclass
 import numpy as np
-from math import atan2, acos, sqrt, sin, cos, pi
+import math
 
 
-# -------------------------- Robot Definition --------------------------
-@dataclass
-class Link:
-    axis: np.ndarray  # rotation axis in local coordinates (3,)
-    offset: np.ndarray  # translation after this joint in local coordinates (3,)
+# --- 1. 회전 행렬 함수 ---
+def R_x(theta):
+    """X축 기준 회전 행렬"""
+    c = math.cos(theta);
+    s = math.sin(theta)
+    return np.array([
+        [1, 0, 0], [0, c, -s], [0, s, c]
+    ])
 
 
-mm = 1.0
-links = [
-    Link(axis=np.array([0, 1, 0]), offset=np.array([0, 50 * mm, 0])),  # 어깨 Y축
-    Link(axis=np.array([1, 0, 0]), offset=np.array([0, 0, 30 * mm])),  # 팔 위쪽 X축
-    Link(axis=np.array([0, 0, 1]), offset=np.array([0, 0, 60 * mm])),  # 팔 Z축
-    Link(axis=np.array([0, 1, 0]), offset=np.array([0, 0, 40 * mm])),  # 팔 아래 Y축
-    Link(axis=np.array([0, 1, 0]), offset=np.array([0, 0, 30 * mm])),  # 손 끝 Y축
-]
+def R_y(theta):
+    """Y축 기준 회전 행렬"""
+    c = math.cos(theta);
+    s = math.sin(theta)
+    return np.array([
+        [c, 0, s], [0, 1, 0], [-s, 0, c]
+    ])
 
 
-# -------------------------- Math Helpers --------------------------
-def skew(v):
-    return np.array([[0, -v[2], v[1]],
-                     [v[2], 0, -v[0]],
-                     [-v[1], v[0], 0]])
+def R_z(theta):
+    """Z축 기준 회전 행렬"""
+    c = math.cos(theta);
+    s = math.sin(theta)
+    return np.array([
+        [c, -s, 0], [s, c, 0], [0, 0, 1]
+    ])
 
 
-def rodrigues(axis, theta):
-    a = axis / np.linalg.norm(axis)
-    K = skew(a)
-    return np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
+# --- 2. 정기구학(FK) 함수 (라디안 입력) ---
+def shoulder_5dof_fk_rad(q_rad,
+                         shoulder=(0.0, 0.0, 0.0),
+                         d_y=0.05, d_z=-0.05, d4_z=0.05, d5_z=0.05, ee_z=0.03):
+    """
+    수정된 5DOF 정기구학 (FK) - 라디안 입력
+    """
+    O = np.array(shoulder, dtype=float)
+    O2 = O + np.array([0, d_y, 0])
+    R1 = R_y(q_rad[0])
+    O3_offset = np.array([0, 0, d_z])
+    O3 = O2 + O3_offset
+    R2 = R1 @ R_x(q_rad[1])
+    O4_local_offset = np.array([0, 0, -d4_z])
+    O4 = O3 + R2 @ O4_local_offset
+    R3 = R2 @ R_z(q_rad[2])
+    O5_local_offset = np.array([0, 0, -d5_z])
+    O5 = O4 + R3 @ O5_local_offset
+    R4 = R3 @ R_y(q_rad[3])
+    EE_local_offset = np.array([0, 0, -ee_z])
+    EE = O5 + R4 @ EE_local_offset
+    return EE
 
 
-def homogenous(R, t):
-    T = np.eye(4)
-    T[:3, :3] = R
-    T[:3, 3] = t
-    return T
+# ----------------------------------------------------
+# --- 3. 자코비안 및 안정화된 IK 솔버 함수 ---
+# ----------------------------------------------------
+
+def calculate_jacobian(q_rad, fk_func, epsilon=1e-6):
+    """
+    수치적 자코비안 행렬 (J) 계산
+    """
+    n_joints = len(q_rad)
+    J = np.zeros((3, n_joints))
+    P_current = fk_func(q_rad)
+
+    for i in range(n_joints):
+        q_perturbed = np.copy(q_rad)
+        q_perturbed[i] += epsilon
+        P_perturbed = fk_func(q_perturbed)
+        J[:, i] = (P_perturbed - P_current) / epsilon
+
+    return J
 
 
-def wrap(a):
-    return (a + pi) % (2 * pi) - pi
+def shoulder_5dof_ik_solver_stable(Px, Py, Pz, q_start_deg,
+                                   max_iterations=10000, tolerance=1e-5, learning_rate=0.03):
+    """
+    자코비안 기반의 안정화된 역기구학 솔버 (Damping 적용)
+    """
+
+    P_target = np.array([Px, Py, Pz])
+    q_rad = np.radians(np.array(q_start_deg, dtype=float))
+
+    print(f"IK 계산 시작. 목표: ({Px}, {Py}, {Pz}) (수정된 매개변수 적용)")
+
+    for i in range(max_iterations):
+        P_current = shoulder_5dof_fk_rad(q_rad)
+        error = P_target - P_current
+
+        # 종료 조건 확인
+        error_norm = np.linalg.norm(error)
+        if error_norm < tolerance:
+            print(f"IK 성공! 반복 횟수: {i}회, 최종 오차: {error_norm:.7f}m")
+            return np.degrees(q_rad)
+
+        # 자코비안 (J) 및 의사 역행렬 (J_pinv) 계산
+        J = calculate_jacobian(q_rad, shoulder_5dof_fk_rad)
+        J_pinv = np.linalg.pinv(J)
+
+        # 5. 관절 각도 업데이트
+        delta_q = J_pinv @ error * learning_rate
+
+        # --- 안전 장치: 최대 각도 변화량 제한 (Damping) ---
+        max_delta_q = np.radians(5.0)  # 최대 5도로 제한
+        delta_q_norm = np.linalg.norm(delta_q)
+
+        if delta_q_norm > max_delta_q:
+            delta_q = delta_q * (max_delta_q / delta_q_norm)
+        # --------------------------------------------------------
+
+        q_rad += delta_q
+
+    # 실패 시
+    error_norm = np.linalg.norm(error)
+    print(f"IK 실패! 최대 반복 횟수 도달. 최종 오차: {error_norm:.7f}m")
+    return np.degrees(q_rad)
 
 
-# -------------------------- Serial Chain --------------------------
-class SerialChain:
-    def __init__(self, links):
-        self.links = links
-        self.n = len(links)
+# ----------------------------------------------------
+# --- 4. 최종 실행 및 검증 (수정된 매개변수) ---
+# ----------------------------------------------------
 
-    def forward(self, thetas):
-        T = np.eye(4)
-        Ts = []
-        for i, L in enumerate(self.links):
-            R = rodrigues(L.axis, thetas[i])
-            T = T @ homogenous(R, np.zeros(3))
-            Ts.append(T.copy())
-            T = T @ homogenous(np.eye(3), L.offset)
-        return T, Ts
+# 목표 위치: (0.00, 0.05, 0.18)
+target_Px, target_Py, target_Pz = 0.00, 0.05, -0.18
 
-    def jacobian_pos(self, thetas):
-        T_end, Ts = self.forward(thetas)
-        p = T_end[:3, 3]
-        J = np.zeros((3, self.n))
-        for i in range(self.n):
-            R_i = Ts[i][:3, :3]
-            axis_w = R_i @ self.links[i].axis
-            o_i = Ts[i][:3, 3]
-            J[:, i] = np.cross(axis_w, p - o_i)
-        return J
+# **수정된 초기 각도:** 특이점 탈출을 위해 작은 오프셋 적용
+q_start = [5.0, 5.0, 5.0, 5.0, 5.0]
 
-    def jacobian_r(self, thetas):
-        T_end, Ts = self.forward(thetas)
-        r_z = T_end[:3, 2]
-        Jr = np.zeros((3, self.n))
-        for i in range(self.n):
-            R_i = Ts[i][:3, :3]
-            axis_w = R_i @ self.links[i].axis
-            Jr[:, i] = np.cross(axis_w, r_z)
-        return Jr, r_z
+# IK 실행 (안정화 솔버 호출, learning_rate=0.03 적용)
+q_solution_deg = shoulder_5dof_ik_solver_stable(
+    target_Px, target_Py, target_Pz, q_start,
+    learning_rate=0.03,
+    max_iterations=10000
+)
 
+# --- 결과 출력 ---
+if q_solution_deg is not None:
+    print("\n" + "=" * 50)
+    print(f"## 🏆 {target_Px, target_Py, target_Pz} 에 대한 IK 최종 해")
+    print(f"q1~q5 (deg): {q_solution_deg}")
 
-# -------------------------- DLS Refine with Relaxed Z --------------------------
-def refine_with_relaxed_z(chain: SerialChain, target, q_init,
-                          max_iters=200, tol_pos=1e-3, tol_rot=1e-3,
-                          alpha=0.9, lam=1e-2, w_rot=5.0):
-    q = np.array(q_init, dtype=float)
-    history = []
-    for it in range(max_iters):
-        T_end, _ = chain.forward(q)
-        p = T_end[:3, 3]
-        err_pos = target - p
+    # FK로 결과 검증
+    P_target = np.array([target_Px, target_Py, target_Pz])
+    EE_check = shoulder_5dof_fk_rad(np.radians(q_solution_deg))
 
-        Jr, r_z = chain.jacobian_r(q)
-        err_rot = -r_z[:2]  # x/y components → pitch/roll 맞추기
-        Jr_xy = Jr[:2, :]
-
-        Jp = chain.jacobian_pos(q)
-        J_comb = np.vstack((Jp, w_rot * Jr_xy))
-        err_comb = np.concatenate((err_pos, w_rot * err_rot))
-
-        history.append((p.copy(), r_z.copy()))
-
-        if np.linalg.norm(err_pos) < tol_pos and np.linalg.norm(err_rot) < tol_rot:
-            return q, True, history
-
-        A = J_comb @ J_comb.T + lam * np.eye(J_comb.shape[0])
-        try:
-            v = np.linalg.solve(A, err_comb)
-        except np.linalg.LinAlgError:
-            v = np.linalg.lstsq(A, err_comb, rcond=None)[0]
-        delta_q = J_comb.T @ v
-        q += alpha * delta_q
-        q = np.vectorize(wrap)(q)
-
-    return q, False, history
-
-
-# -------------------------- IK Pipeline --------------------------
-def ik_relaxed_z_pipeline(target, q_init=None):
-    chain = SerialChain(links)
-
-    # 초기값 지정: 사용자가 넣으면 그걸 쓰고, 없으면 0으로
-    if q_init is None:
-        q0 = np.zeros(len(links))
-    else:
-        q0 = np.array(q_init)
-
-    q_final, success, hist = refine_with_relaxed_z(chain, target, q0,
-                                                   max_iters=300, tol_pos=1e-3, tol_rot=1e-3,
-                                                   alpha=0.9, lam=1e-2, w_rot=5.0)
-    T_end, _ = chain.forward(q_final)
-    return {
-        "q_init_deg": np.degrees(q0),
-        "q_final_deg": np.degrees(q_final),
-        "success": success,
-        "ee_pos": T_end[:3, 3],
-        "ee_rz": T_end[:3, 2],
-        "history": hist
-    }
-
-
-# -------------------------- Usage Example --------------------------
-if __name__ == "__main__":
-    target = np.array([80.0, 50.0, 90.0])
-
-    # 초기값 직접 지정 가능 (예: 다 0도)
-    q_init = [0, 0, 0, 90, 0]  # 5관절 초기값
-    out = ik_relaxed_z_pipeline(target, q_init=q_init)
-
-    print("init (deg):", out["q_init_deg"])
-    print("final (deg):", out["q_final_deg"])
-    print("success:", out["success"])
-    print("EE pos (mm):", out["ee_pos"])
-    print("EE z (world):", out["ee_rz"])
+    print("-" * 50)
+    print(f"FK 검증 위치 (m): {EE_check}")
+    print(f"목표 위치 (m): {P_target}")
+    print(f"최종 위치 오차: {np.linalg.norm(EE_check - P_target):.7f}m")
