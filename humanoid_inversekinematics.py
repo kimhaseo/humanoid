@@ -1,152 +1,122 @@
+# 필요한 라이브러리: pip install roboticstoolbox-python numpy
+
+import roboticstoolbox as rtb
 import numpy as np
-import math
+from spatialmath import SE3
+
+## 1. D-H 파라미터 정의 및 로봇 모델 생성
+# 이 파라미터는 현재 사용자의 코드가 성공한 '예시' 값입니다.
+# 실제 로봇 설계 시 아래 값을 정확하게 측정하여 수정해야 합니다.
+# DH 파라미터: [alpha, a, theta_offset, d]
+links = [
+    # L1 (어깨 베이스): d=0.2 (베이스 높이), alpha=pi/2
+    rtb.RevoluteDH(d=0.2, a=0, alpha=np.pi / 2, offset=0),
+    # L2 (상완 링크): a=0.3 (상완 길이)
+    rtb.RevoluteDH(d=0, a=0.3, alpha=0, offset=0),
+    # L3 (팔꿈치 오프셋 전 링크): a=0.2
+    rtb.RevoluteDH(d=0, a=0.2, alpha=np.pi / 2, offset=0),
+    # L4 (팔뚝 링크): d=0.2
+    rtb.RevoluteDH(d=0.2, a=0, alpha=-np.pi / 2, offset=0),
+    # L5 (손목 피치)
+    rtb.RevoluteDH(d=0, a=0, alpha=np.pi / 2, offset=0),
+    # L6 (손목 롤): d=0.1 (엔드 이펙터까지의 최종 오프셋)
+    rtb.RevoluteDH(d=0.1, a=0, alpha=0, offset=0)
+]
+# 6개의 링크로 구성된 로봇 모델을 생성합니다.
+robot = rtb.DHRobot(links, name='Custom_6DOF_Arm')
 
 
-# --- 1. 회전 행렬 함수 ---
-def R_x(theta):
-    """X축 기준 회전 행렬"""
-    c = math.cos(theta);
-    s = math.sin(theta)
-    return np.array([
-        [1, 0, 0], [0, c, -s], [0, s, c]
-    ])
-
-
-def R_y(theta):
-    """Y축 기준 회전 행렬"""
-    c = math.cos(theta);
-    s = math.sin(theta)
-    return np.array([
-        [c, 0, s], [0, 1, 0], [-s, 0, c]
-    ])
-
-
-def R_z(theta):
-    """Z축 기준 회전 행렬"""
-    c = math.cos(theta);
-    s = math.sin(theta)
-    return np.array([
-        [c, -s, 0], [s, c, 0], [0, 0, 1]
-    ])
-
-
-# --- 2. 정기구학(FK) 함수 (라디안 입력) ---
-def shoulder_5dof_fk_rad(q_rad,
-                         shoulder=(0.0, 0.0, 0.0),
-                         d_y=0.05, d_z=-0.05, d4_z=0.05, d5_z=0.05, ee_z=0.03):
+def solve_inverse_kinematics(target_position: list, target_rpy: list, initial_guess=None):
     """
-    수정된 5DOF 정기구학 (FK) - 라디안 입력
-    """
-    O = np.array(shoulder, dtype=float)
-    O2 = O + np.array([0, d_y, 0])
-    R1 = R_y(q_rad[0])
-    O3_offset = np.array([0, 0, d_z])
-    O3 = O2 + O3_offset
-    R2 = R1 @ R_x(q_rad[1])
-    O4_local_offset = np.array([0, 0, -d4_z])
-    O4 = O3 + R2 @ O4_local_offset
-    R3 = R2 @ R_z(q_rad[2])
-    O5_local_offset = np.array([0, 0, -d5_z])
-    O5 = O4 + R3 @ O5_local_offset
-    R4 = R3 @ R_y(q_rad[3])
-    EE_local_offset = np.array([0, 0, -ee_z])
-    EE = O5 + R4 @ EE_local_offset
-    return EE
+    목표 위치(XYZ)와 자세(RPY)에 대한 역기구학을 계산하는 함수입니다.
 
-
-# ----------------------------------------------------
-# --- 3. 자코비안 및 안정화된 IK 솔버 함수 ---
-# ----------------------------------------------------
-
-def calculate_jacobian(q_rad, fk_func, epsilon=1e-6):
-    """
-    수치적 자코비안 행렬 (J) 계산
-    """
-    n_joints = len(q_rad)
-    J = np.zeros((3, n_joints))
-    P_current = fk_func(q_rad)
-
-    for i in range(n_joints):
-        q_perturbed = np.copy(q_rad)
-        q_perturbed[i] += epsilon
-        P_perturbed = fk_func(q_perturbed)
-        J[:, i] = (P_perturbed - P_current) / epsilon
-
-    return J
-
-
-def shoulder_5dof_ik_solver_stable(Px, Py, Pz, q_start_deg,
-                                   max_iterations=10000, tolerance=1e-5, learning_rate=0.03):
-    """
-    자코비안 기반의 안정화된 역기구학 솔버 (Damping 적용)
+    :param target_position: 목표 [x, y, z] 리스트 또는 배열 (m)
+    :param target_rpy: 목표 [Roll, Pitch, Yaw] 리스트 또는 배열 (deg)
+    :param initial_guess: IK 솔버가 시작할 초기 관절 각도 [q1, q2, ..., q6] (rad)
+    :return: 6개의 관절 각도 (rad) 또는 None (실패 시)
     """
 
-    P_target = np.array([Px, Py, Pz])
-    q_rad = np.radians(np.array(q_start_deg, dtype=float))
+    # 목표 자세 (Roll, Pitch, Yaw)를 도(deg)에서 라디안(rad)으로 변환
+    target_rpy_rad = np.radians(target_rpy)
 
-    print(f"IK 계산 시작. 목표: ({Px}, {Py}, {Pz}) (수정된 매개변수 적용)")
+    # 1. 목표 포즈 (Target Pose) 정의 (4x4 동차 변환 행렬 T_target)
+    # SE3.Trans()로 위치, SE3.RPY() 생성자로 자세를 정의하여 행렬을 생성
+    T_target = SE3.Trans(target_position[0], target_position[1], target_position[2]) * \
+               SE3.RPY(target_rpy_rad, unit='rad')
 
-    for i in range(max_iterations):
-        P_current = shoulder_5dof_fk_rad(q_rad)
-        error = P_target - P_current
+    # 초기 관절 각도 설정 (시작점)
+    if initial_guess is None:
+        q0 = np.array([0, 0, 0, 0, 0, 0])
+    else:
+        q0 = np.array(initial_guess)
 
-        # 종료 조건 확인
-        error_norm = np.linalg.norm(error)
-        if error_norm < tolerance:
-            print(f"IK 성공! 반복 횟수: {i}회, 최종 오차: {error_norm:.7f}m")
-            return np.degrees(q_rad)
+    print(f"--- IK 계산 시작 ---")
+    print(f"목표 위치 (XYZ): {target_position} m")
+    print(f"목표 자세 (RPY): {target_rpy} deg")
 
-        # 자코비안 (J) 및 의사 역행렬 (J_pinv) 계산
-        J = calculate_jacobian(q_rad, shoulder_5dof_fk_rad)
-        J_pinv = np.linalg.pinv(J)
+    # 2. 역기구학(IK) 계산 실행 (Levenberg-Marquardt 알고리즘 사용)
+    # 이 수치적 솔버가 자코비안 행렬을 반복적으로 사용하여 해를 찾습니다.
+    sol = robot.ikine_LM(
+        T_target,
+        q0=q0,
+        ilimit=500,  # 최대 반복 횟수
+        tol=1e-6,  # 오차 허용 한계
+        mask=[1, 1, 1, 1, 1, 1]  # 6자유도 모두(위치 3개, 자세 3개) 고려
+    )
 
-        # 5. 관절 각도 업데이트
-        delta_q = J_pinv @ error * learning_rate
+    # 3. 결과 반환 및 검증
+    if sol.success:
+        q_solution = sol.q  # 최종 계산된 6개 관절 각도 (라디안)
 
-        # --- 안전 장치: 최대 각도 변화량 제한 (Damping) ---
-        max_delta_q = np.radians(5.0)  # 최대 5도로 제한
-        delta_q_norm = np.linalg.norm(delta_q)
+        # 검증을 위한 정기구학(FK) 수행
+        T_achieved = robot.fkine(q_solution)
+        position_error = np.linalg.norm(T_target.t - T_achieved.t)
 
-        if delta_q_norm > max_delta_q:
-            delta_q = delta_q * (max_delta_q / delta_q_norm)
-        # --------------------------------------------------------
+        print("\n✅ IK 계산 성공")
+        print(f"최종 관절 각도 (라디안): {q_solution}")
+        print(f"최종 관절 각도 (도): {np.degrees(q_solution)}")
+        print(f"도달 위치 오차 (Norm): {position_error:.6f} m")
 
-        q_rad += delta_q
-
-    # 실패 시
-    error_norm = np.linalg.norm(error)
-    print(f"IK 실패! 최대 반복 횟수 도달. 최종 오차: {error_norm:.7f}m")
-    return np.degrees(q_rad)
+        return q_solution
+    else:
+        print("\n❌ IK 해를 찾는 데 실패했습니다. 목표 포즈가 작업 공간을 벗어났거나 특이점 근처일 수 있습니다.")
+        return None
 
 
-# ----------------------------------------------------
-# --- 4. 최종 실행 및 검증 (수정된 매개변수) ---
-# ----------------------------------------------------
+# ... (중략: solve_inverse_kinematics 함수 정의)
 
-# 목표 위치: (0.00, 0.05, 0.18)
-target_Px, target_Py, target_Pz = 0.00, 0.05, -0.18
+# ==========================================================
+# 🚀 함수 실행 예시 (테스트 버전)
+# ==========================================================
 
-# **수정된 초기 각도:** 특이점 탈출을 위해 작은 오프셋 적용
-q_start = [5.0, 5.0, 5.0, 5.0, 5.0]
+# 1. 목표 위치 [X, Y, Z] (미터)
 
-# IK 실행 (안정화 솔버 호출, learning_rate=0.03 적용)
-q_solution_deg = shoulder_5dof_ik_solver_stable(
-    target_Px, target_Py, target_Pz, q_start,
-    learning_rate=0.03,
-    max_iterations=10000
-)
+# **로봇 베이스에 더 가깝게 목표 설정**
+TARGET_POS_TEST = [0.2, 0.1, 0.25]
 
-# --- 결과 출력 ---
-if q_solution_deg is not None:
-    print("\n" + "=" * 50)
-    print(f"## 🏆 {target_Px, target_Py, target_Pz} 에 대한 IK 최종 해")
-    print(f"q1~q5 (deg): {q_solution_deg}")
+# 2. 목표 자세 [Roll, Pitch, Yaw] (도)
+TARGET_RPY_TEST = [50, 0, 0] # 단순한 자세로 설정
 
-    # FK로 결과 검증
-    P_target = np.array([target_Px, target_Py, target_Pz])
-    EE_check = shoulder_5dof_fk_rad(np.radians(q_solution_deg))
+# 3. 초기 추측값 (Optional, 특이점 회피 시도)# ... (중략: solve_inverse_kinematics 함수 정의)
+# # ==========================================================
+# # 🚀 함수 실행 예시 (테스트 버전)
+# # ==========================================================
+#
+# # 1. 목표 위치 [X, Y, Z] (미터)
+# # **로봇 베이스에 더 가깝게 목표 설정**
+# TARGET_POS_TEST = [0.2, 0.1, 0.3]
+#
+# # 2. 목표 자세 [Roll, Pitch, Yaw] (도)
+# TARGET_RPY_TEST = [0, 0, 0] # 단순한 자세로 설정
+#
+# # 3. 초기 추측값 (Optional, 특이점 회피 시도)
+# INITIAL_Q_GUESS = [0.1, 0.1, 0.1, 0, 0, 0]
+#
+# # IK 계산 실행
+# print("\n========== 테스트 1: 목표 위치 단순화 ==========")
+# solution_q = solve_inverse_kinematics(TARGET_POS_TEST, TARGET_RPY_TEST, INITIAL_Q_GUESS)
+INITIAL_Q_GUESS = [0.1, 0.1, 0.1, 0, 0, 0]
 
-    print("-" * 50)
-    print(f"FK 검증 위치 (m): {EE_check}")
-    print(f"목표 위치 (m): {P_target}")
-    print(f"최종 위치 오차: {np.linalg.norm(EE_check - P_target):.7f}m")
+# IK 계산 실행
+print("\n========== 테스트 1: 목표 위치 단순화 ==========")
+solution_q = solve_inverse_kinematics(TARGET_POS_TEST, TARGET_RPY_TEST, INITIAL_Q_GUESS)
