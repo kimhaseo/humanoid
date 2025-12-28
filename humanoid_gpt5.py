@@ -1,66 +1,51 @@
+import roboticstoolbox as rtb
 import numpy as np
+from spatialmath import SE3
+import matplotlib.pyplot as plt
+import time
 
-def rotation_y(theta):
-    c, s = np.cos(theta), np.sin(theta)
-    return np.array([
-        [c, 0, s],
-        [0, 1, 0],
-        [-s, 0, c]
-    ])
+# 1. 로봇 모델 정의
+links = [
+    # 1. Shoulder Pitch: alpha=0으로 둡니다. (이미 base에서 눕힐 것이기 때문)
+    rtb.RevoluteDH(d=0, a=0, alpha=np.pi / 2, ),
+    rtb.RevoluteDH(d=0.05, a=0, alpha=np.pi / 2, offset=0),
+    # rtb.RevoluteDH(d=0.1, a=0.1, alpha=-np.pi / 2),
+    # rtb.RevoluteDH(d=0, a=0.1, alpha=np.pi / 2),
+    # rtb.RevoluteDH(d=0, a=0, alpha=np.pi / 2),
+    # rtb.RevoluteDH(d=0.1, a=0, alpha=0)
+]
 
-def rotation_x(theta):
-    c, s = np.cos(theta), np.sin(theta)
-    return np.array([
-        [1, 0, 0],
-        [0, c, -s],
-        [0, s, c]
-    ])
+robot = rtb.DHRobot(links, name='Humanoid_Arm')
 
-def rotation_z(theta):
-    c, s = np.cos(theta), np.sin(theta)
-    return np.array([
-        [c, -s, 0],
-        [s, c, 0],
-        [0, 0, 1]
-    ])
+# [핵심 수정]
+# 1. 위치를 0.2m 올리고 (Trans)
+# 2. X축 기준으로 90도 회전시켜서(Rx) 1번 관절 축을 옆으로 눕힙니다.
+# 이렇게 해야 1번 관절이 베이스 Z축(하늘)이 아닌 옆을 축으로 '앞뒤'로 돕니다.
+robot.base = SE3.Trans(0, 0, 0.2) * SE3.Rx(np.pi / 2)
 
-def fk_5dof_shoulder_custom(q1_deg, q2_deg, q3_deg, q4_deg, q5_deg):
-    q1 = np.radians(q1_deg)  # 관절1 y축 회전
-    q2 = np.radians(q2_deg)  # 관절2 x축 회전
-    q3 = np.radians(q3_deg)  # 관절3 z축 회전
-    q4 = np.radians(q4_deg)  # 관절4 y축 회전
-    q5 = np.radians(q5_deg)  # 관절5 y축 회전
+# 2. 시각화 및 루프 (기존과 동일)
+q_current = np.zeros(6)
+env = robot.plot(q_current, backend='pyplot', jointaxes=True, block=False)
 
-    R1 = rotation_y(q1)
-    R2 = rotation_x(q2)
-    R3 = rotation_z(q3)
-    R4 = rotation_y(q4)
-    R5 = rotation_y(q5)
+print("🎬 진짜 어깨 앞뒤 회전 테스트 시작...")
 
-    offset_joint2 = np.array([0, 0.05, 0])
-    pos_joint2 = R1 @ offset_joint2
+t = 0
+try:
+    while True:
+        x = 0.15 + 0.05 * np.cos(t)
+        y = 0.05 + 0.05 * np.sin(t)
+        z = 0.15 + 0.03 * np.sin(2 * t)
 
-    link2_vector = np.array([0, 0, -0.06])
-    pos_joint3 = pos_joint2 + R1 @ R2 @ link2_vector
+        T_target = SE3.Trans(x, y, z) * SE3.RPY(0, np.radians(45), 0)
+        sol = robot.ikine_LM(T_target, q0=q_current, mask=[1, 1, 1, 1, 1, 0])
 
-    link3_vector = np.array([0, 0, -0.06])
-    pos_joint4 = pos_joint3 + R1 @ R2 @ R3 @ link3_vector
+        if sol.success:
+            q_current = sol.q
+            robot.q = q_current
+            env.step(0.001)
 
-    link4_vector = np.array([0.07, 0, 0])
-    pos_joint5 = pos_joint4 + R1 @ R2 @ R3 @ R4 @ link4_vector
-
-    link5_vector = np.array([0.05, 0, 0])  # x축 방향 50mm
-    end_pos = pos_joint5 + R1 @ R2 @ R3 @ R4 @ R5 @ link5_vector
-
-    R_end = R1 @ R2 @ R3 @ R4 @ R5
-
-    return end_pos, R_end
-
-# 테스트
-pos, R = fk_5dof_shoulder_custom(0, 0, 0, 0, 0)
-
-pos_rounded = np.round(pos, 4)
-R_rounded = np.round(R, 4)
-
-print("엔드포인트 위치 (m):", pos_rounded)
-print("엔드포인트 회전 행렬:\n", R_rounded)
+        t += 0.04
+        time.sleep(0.01)
+        if not plt.fignum_exists(plt.gcf().number): break
+except KeyboardInterrupt:
+    pass
