@@ -1,56 +1,69 @@
-import matplotlib.pyplot as plt
 import roboticstoolbox as rtb
 from roboticstoolbox import ET
+from spatialmath import SE3
 import numpy as np
+import matplotlib.pyplot as plt
 import time
+import sys
 
-# 1. ETS 정의 (사용자 모델)
-e = ET.Ry(jindex=0) * ET.ty(0.05)
-e *= ET.Rx(jindex=1) * ET.tz(-0.05)
-e *= ET.Rz(jindex=2) * ET.tz(-0.07)
-e *= ET.Ry(jindex=3) * ET.tx(0.05)
-e *= ET.Ry(jindex=4) * ET.tx(0.05)
-e *= ET.Rx(jindex=5) * ET.tx(0.02)
+# 1. 로봇 정의 (기존과 동일)
+lim = [-np.pi * 150 / 180, np.pi * 150 / 180]
+e = ET.Ry(jindex=0, qlim=lim) * ET.ty(0.05)
+e *= ET.Rx(jindex=1, qlim=lim) * ET.tz(-0.05)
+e *= ET.Rz(jindex=2, qlim=lim) * ET.tz(-0.1)
+e *= ET.Ry(jindex=3, qlim=lim) * ET.tx(0.1)
+e *= ET.Ry(jindex=4, qlim=lim) * ET.tx(0.03)
+e *= ET.Rx(jindex=5, qlim=lim) * ET.tx(0.01)
 
-my_robot = rtb.ERobot(e, name="My_Design")
+my_robot = rtb.ERobot(e, name="My_Smooth_Robot")
+q_current = np.zeros(6)
 
-# 2. 시각화 초기화 (문제가 되는 backend 명시와 teach를 아예 제거)
-# block=False로 설정하여 아래의 while 루프가 즉시 실행되게 합니다.
-env = my_robot.plot([0] * 6, jointaxes=True, block=False)
+# 2. 시각화 설정
+env = my_robot.plot(q_current, backend='pyplot', jointaxes=True, block=False)
 
-print("🚀 시뮬레이션 시작! 루프가 돌며 로봇이 움직이는지 확인하세요.")
+print("🚀 보간(Interpolation) 적용 시뮬레이션 시작...")
 
+# 보간 설정
+steps = 10  # 현재 위치에서 다음 목표까지의 분할 단계 (클수록 부드러움)
+
+t_cycle = 0
 try:
-    current_q = np.zeros(6)
-    loop_count = 0
-
     while True:
-        loop_count += 1
-        # 새로운 랜덤 목표 각도
-        q_target = (np.random.rand(6) - 0.5) * np.pi
+        # 3. 목표 지점 계산 (원형 궤적)
+        target_x = 0.05 + 0.03 * np.cos(t_cycle)
+        target_y = 0.05 + 0.03 * np.sin(t_cycle)
+        target_z = -0.05
+        T_target = SE3.Trans(target_x, target_y, target_z) * SE3.RPY(0, np.radians(-90), 0)
 
-        steps = 10  # 빠른 확인을 위해 스텝 축소
-        for i in range(steps):
-            q_now = current_q + (q_target - current_q) * (i / steps)
+        # 4. 역운동학(IK) 수행 - 최종 목표 각도(q_goal) 찾기
+        sol = my_robot.ikine_LM(T_target, q0=q_current)
 
-            # 3. 화면 강제 업데이트 (가장 안전한 방식)
-            env.q = q_now
+        if sol.success:
+            q_goal = sol.q
 
-            # --- 엔드이펙터 포즈(위치 + 자세) 계산 ---
-            T = my_robot.fkine(q_now)
-            pos = T.t  # 위치 (x, y, z)
-            rpy = T.rpy(unit='deg')  # 자세 (Roll, Pitch, Yaw)
+            # 5. JTRAJ를 이용한 보간 실행
+            # q_current에서 q_goal까지 'steps'만큼 부드러운 경로 생성
+            traj = rtb.jtraj(q_current, q_goal, steps)
 
-            # 터미널 출력: 루프 카운트 + 위치 + 자세
-            print(
-                f"[{loop_count:03d}] 📍 X:{pos[0]:.2f} Y:{pos[1]:.2f} Z:{pos[2]:.2f} | 🔄 R:{rpy[0]:.1f}° P:{rpy[1]:.1f}° Y:{rpy[2]:.1f}° ",
-                end='\r')
+            # 6. 생성된 궤적을 따라 미세 이동
+            for q_step in traj.q:
+                q_current = q_step
+                my_robot.q = q_current
+                env.step(0.01)  # 시뮬레이션 갱신
 
-            # GUI 엔진에게 그릴 시간을 줌
-            plt.pause(0.001)
+                # 실시간 출력 (deg)
+                q_deg = np.degrees(q_current)
+                msg = f"\r⚙️ Smooth Moving: Q0:{q_deg[0]:5.1f}, Q1:{q_deg[1]:5.1f}, Q2:{q_deg[2]:5.1f}"
+                sys.stdout.write(msg)
+                sys.stdout.flush()
 
-        current_q = q_target
-        time.sleep(0.1)
+        else:
+            sys.stdout.write("\r⚠️ Warning: Out of reach!                          ")
+            sys.stdout.flush()
+
+        t_cycle += 0.2  # 궤적 진행 속도
+        if not plt.fignum_exists(plt.gcf().number):
+            break
 
 except KeyboardInterrupt:
-    print("\n👋 종료합니다.")
+    print("\n👋 시뮬레이션 종료")
