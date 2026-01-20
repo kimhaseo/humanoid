@@ -31,7 +31,7 @@ try:
         # 3. 목표 지점 계산 (원형 궤적)
         target_x = 0.05 + 0.03 * np.cos(t_cycle)
         target_y = 0.05 + 0.03 * np.sin(t_cycle)
-        target_z = -0.2
+        target_z = -0.15
         T_target = SE3.Trans(target_x, target_y, target_z) * SE3.RPY(0, np.radians(90), 0)
 
         # 4. 역운동학(IK) 수행 - 최종 목표 각도(q_goal) 찾기
