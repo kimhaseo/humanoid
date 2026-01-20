@@ -3,7 +3,6 @@ from roboticstoolbox import ET
 from spatialmath import SE3
 import numpy as np
 import matplotlib.pyplot as plt
-import time
 import sys
 
 # 1. 로봇 정의 (기존과 동일)
@@ -24,7 +23,7 @@ env = my_robot.plot(q_current, backend='pyplot', jointaxes=True, block=False)
 print("🚀 보간(Interpolation) 적용 시뮬레이션 시작...")
 
 # 보간 설정
-steps = 10  # 현재 위치에서 다음 목표까지의 분할 단계 (클수록 부드러움)
+steps = 100  # 현재 위치에서 다음 목표까지의 분할 단계 (클수록 부드러움)
 
 t_cycle = 0
 try:
